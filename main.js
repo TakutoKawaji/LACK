@@ -41,7 +41,7 @@ coverImg.src = "assets/cover.png";
 // 辞書
 // -----------------------------
 let dictionary = {};
-fetch("assets/dictionary.json")
+fetch("assets/mydic.json")
   .then(resp=>resp.json())
   .then(json=>dictionary=json);
 
