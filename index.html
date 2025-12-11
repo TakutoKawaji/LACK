@@ -320,11 +320,11 @@ function findEulerianPath(edges) {
 
 function generateRandomPatterns(count=5) {
     const results = [];
-    const keys = Object.keys(MOCK_DICTIONARY);
+    const keys = Object.keys(dictionaryData);
     
     for (let i=0; i<count; i++) {
         const word = keys[Math.floor(Math.random() * keys.length)];
-        const entry = MOCK_DICTIONARY[word];
+        const entry = dictionaryData[word];
         if (!entry) continue;
 
         const codeStr = entry.code;
