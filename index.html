@@ -1,15 +1,644 @@
 <!DOCTYPE html>
 <html lang="ja">
 <head>
-<meta charset="UTF-8">
-<title>LACK</title>
-<style>
-  body { margin:0; background:#141414; }
-  canvas { display:block; margin:auto; background:#141414; }
-</style>
+    <meta charset="UTF-8">
+    <title>LACK - JSON Dictionary Port</title>
+    <style>
+        body {
+            background-color: #141414; /* (20, 20, 20) */
+            margin: 0;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            color: white;
+            font-family: 'Courier New', sans-serif;
+            overflow: hidden;
+        }
+        canvas {
+            box-shadow: 0 0 20px rgba(0,0,0,0.5);
+            cursor: crosshair;
+        }
+        #overlay {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            color: #888;
+            pointer-events: none;
+        }
+    </style>
 </head>
 <body>
-<canvas id="gameCanvas" width="800" height="600"></canvas>
-<script src="main.js"></script>
+    <div id="overlay">Loading Dictionary...</div>
+    <canvas id="gameCanvas" width="800" height="600"></canvas>
+
+<script>
+// --- 定数・設定 ---
+const WIDTH = 800;
+const HEIGHT = 600;
+const RADIUS = 22;
+const BG_COLOR = "#141414"; 
+const DOT_COLOR = "#B4B4B4"; 
+const DOT_ACTIVE_COLOR = "#50A0FF"; 
+const LINE_COLOR = "#50A0FF";
+const BUTTON_BG = "#64C864"; 
+const PLAY_BUTTON_BG = "#C86464"; 
+const BUTTON_TEXT_COLOR = "#FFFFFF";
+
+// ドット配置計算
+const grid_x = Math.floor(WIDTH / 12);
+const grid_y = Math.floor(HEIGHT / 4);
+const SPACING_X = 80;
+const SPACING_Y = 80;
+
+// --- グローバル状態変数 ---
+const dots = [];
+let selected = [];
+let pathPoints = []; 
+let dragging = false;
+let currentMousePos = {x: 0, y: 0};
+let lastDotIndex = null;
+let specialReentryUsed = false;
+
+let userPatterns = []; 
+let randomPatterns = []; 
+let matchedWords = []; 
+
+// JSONでロードする辞書
+let dictionaryData = null; 
+let isGameReady = false;
+
+// 辞書・コード定義 (Pygameコードより移植)
+const CODE_TO_LINE = {
+    "a": [[0, 2]],
+    "o": [[1, 4]],
+    "m": [[2, 3], [3, 4]],
+    "n": [[0, 1]],
+    "r": [[0, 4]],
+    "y": [[1, 2]],
+    "k": [[0, 3]],
+    "b": [[0, 0]],
+};
+
+// UI Rects
+const buttonRect = {x: WIDTH - 100, y: HEIGHT - 60, w: 80, h: 40};
+const playRect = {x: WIDTH - 120, y: 220, w: 80, h: 40}; 
+
+
+// --- JSON辞書のロード ---
+async function loadDictionary() {
+    const overlay = document.getElementById('overlay');
+    try {
+        const response = await fetch('mydic.json');
+        if (!response.ok) {
+            throw new Error(`HTTP error! status: ${response.status}`);
+        }
+        dictionaryData = await response.json();
+        overlay.textContent = "Click anywhere to start Audio Context";
+        isGameReady = true;
+        
+        // 辞書ロード後、ゲーム初期化を実行
+        initDots();
+        randomPatterns = generateRandomPatterns(5);
+        playAllRandomPatterns(); // 初回再生
+        
+    } catch (e) {
+        console.error("Failed to load dictionary:", e);
+        overlay.textContent = `Error loading mydic.json: ${e.message}`;
+    }
+}
+
+
+// --- Web Audio API (サウンドエンジン) ---
+const AudioContext = window.AudioContext || window.webkitAudioContext;
+let audioCtx = new AudioContext();
+let masterGain = audioCtx.createGain();
+masterGain.connect(audioCtx.destination);
+masterGain.gain.value = 0.3;
+
+function playSoundForLine(u, v, startTime, duration) {
+    const pair = [Math.min(u, v), Math.max(u, v)].toString();
+    const osc = audioCtx.createOscillator();
+    const gain = audioCtx.createGain();
+    
+    osc.connect(gain);
+    gain.connect(masterGain);
+
+    const t = startTime;
+    const dur = duration;
+
+    switch(pair) {
+        case "0,1": // hilbert_phase_warp (Phaser like)
+            osc.type = 'sine';
+            osc.frequency.setValueAtTime(350, t);
+            const lfo = audioCtx.createOscillator();
+            lfo.frequency.value = 20;
+            const lfoGain = audioCtx.createGain();
+            lfoGain.gain.value = 100;
+            lfo.connect(lfoGain);
+            lfoGain.connect(osc.frequency);
+            lfo.start(t);
+            lfo.stop(t+dur);
+            break;
+        case "0,2": // hyper_fm (Chirp like)
+            osc.type = 'triangle';
+            osc.frequency.setValueAtTime(200, t);
+            osc.frequency.exponentialRampToValueAtTime(8000, t + dur);
+            break;
+        case "0,3": // bubble_pop
+            osc.type = 'sine';
+            osc.frequency.setValueAtTime(2200, t);
+            osc.frequency.exponentialRampToValueAtTime(100, t + dur * 0.3);
+            break;
+        case "0,4": // chirp_whistle
+            osc.type = 'sine';
+            osc.frequency.setValueAtTime(5000, t);
+            osc.frequency.linearRampToValueAtTime(10000, t + dur);
+            break;
+        case "1,2": // fluid_vortex (AM modulation)
+            osc.type = 'sine';
+            osc.frequency.value = 120;
+            const am = audioCtx.createOscillator();
+            am.frequency.value = 8;
+            const amGain = audioCtx.createGain();
+            amGain.gain.value = 0.8;
+            am.connect(amGain);
+            amGain.connect(gain.gain);
+            am.start(t);
+            am.stop(t+dur);
+            break;
+        case "1,4": // microtube_hiss (Noise)
+            const bufferSize = audioCtx.sampleRate * dur;
+            const buffer = audioCtx.createBuffer(1, bufferSize, audioCtx.sampleRate);
+            const data = buffer.getChannelData(0);
+            for (let i = 0; i < bufferSize; i++) {
+                data[i] = (Math.random() * 2 - 1) * 0.5; 
+            }
+            const noise = audioCtx.createBufferSource();
+            noise.buffer = buffer;
+            const filter = audioCtx.createBiquadFilter();
+            filter.type = 'bandpass';
+            filter.frequency.value = 3800;
+            filter.Q.value = 1;
+            noise.connect(filter);
+            filter.connect(gain);
+            noise.start(t);
+            osc.disconnect(); 
+            return; 
+        default:
+            osc.type = 'sine';
+            osc.frequency.setValueAtTime(440, t);
+    }
+
+    gain.gain.setValueAtTime(0, t);
+    gain.gain.linearRampToValueAtTime(1, t + 0.05);
+    gain.gain.linearRampToValueAtTime(0, t + dur);
+
+    if (pair !== "1,4") { 
+        osc.start(t);
+        osc.stop(t + dur);
+    }
+}
+
+function playPatternSound(patternPath) {
+    if (audioCtx.state === 'suspended') audioCtx.resume();
+    
+    const indices = patternToIndices(patternPath);
+    const now = audioCtx.currentTime;
+    let offset = 0;
+    const stepDur = 0.2;
+
+    for (let i = 0; i < indices.length - 1; i++) {
+        const u = indices[i];
+        const v = indices[i+1];
+        playSoundForLine(u, v, now + offset, stepDur);
+        offset += stepDur * 0.8; 
+    }
+}
+
+// --- ロジック関数 (変更なし) ---
+
+function initDots() {
+    let index = 0;
+    for (let row = 0; row < 3; row++) {
+        for (let col = 0; col < 3; col++) {
+            if (row === 0 && col === 1) continue;
+            if (row === 1) continue; 
+            
+            const x = grid_x + col * SPACING_X;
+            const y = grid_y + row * SPACING_Y;
+            
+            dots.push({
+                x: x, y: y, r: RADIUS,
+                rect: {left: x - RADIUS, top: y - RADIUS, right: x + RADIUS, bottom: y + RADIUS},
+                index: index++
+            });
+        }
+    }
+}
+
+function randomPointInDot(dotIdx) {
+    const d = dots[dotIdx];
+    const r = Math.random() * RADIUS;
+    const theta = Math.random() * 2 * Math.PI;
+    return {
+        x: d.x + r * Math.cos(theta),
+        y: d.y + r * Math.sin(theta)
+    };
+}
+
+function findEulerianPath(edges) {
+    const graph = {};
+    const degrees = {};
+    
+    for (let i=0; i<5; i++) { graph[i] = []; degrees[i] = 0; }
+
+    edges.forEach(e => {
+        const u = e[0], v = e[1];
+        graph[u].push(v);
+        graph[v].push(u);
+        degrees[u]++;
+        degrees[v]++;
+    });
+
+    let startNode = edges[0] ? edges[0][0] : 0;
+    for (let k in degrees) {
+        if (degrees[k] % 2 === 1) {
+            startNode = parseInt(k);
+            break;
+        }
+    }
+
+    const adj = {};
+    for(let i=0; i<5; i++) adj[i] = [];
+    edges.forEach(e => {
+        adj[e[0]].push(e[1]);
+        adj[e[1]].push(e[0]);
+    });
+
+    let stack = [startNode];
+    let route = [];
+
+    while (stack.length > 0) {
+        let v = stack[stack.length - 1];
+        if (adj[v] && adj[v].length > 0) {
+            let u = adj[v].pop();
+            const idx = adj[u].indexOf(v);
+            if (idx > -1) adj[u].splice(idx, 1);
+            stack.push(u);
+        } else {
+            route.push(stack.pop());
+        }
+    }
+    return route.reverse();
+}
+
+function generateRandomPatterns(count=5) {
+    if (!dictionaryData) return [];
+    
+    const results = [];
+    const keys = Object.keys(dictionaryData);
+    
+    for (let i=0; i<count; i++) {
+        const word = keys[Math.floor(Math.random() * keys.length)];
+        const entry = dictionaryData[word];
+        if (!entry || !entry.code) continue;
+
+        const codeStr = entry.code;
+        let edges = [];
+        for (let char of codeStr) {
+            if (CODE_TO_LINE[char]) {
+                edges.push(...CODE_TO_LINE[char]);
+            }
+        }
+
+        if (edges.length === 0) continue;
+
+        try {
+            const pathIndices = findEulerianPath(edges);
+            if (pathIndices.length < 2) continue;
+
+            const path = pathIndices.map(idx => randomPointInDot(idx));
+            
+            const usedLines = new Set();
+            edges.forEach(e => {
+                const s = [Math.min(e[0], e[1]), Math.max(e[0], e[1])].toString();
+                usedLines.add(s);
+            });
+
+            results.push({
+                word: word,
+                path: path,
+                used_lines: usedLines,
+                display_idx: 0
+            });
+        } catch(e) {
+            console.error("Path gen failed for", word, e);
+        }
+    }
+    return results;
+}
+
+function patternToIndices(path) {
+    return path.map(p => {
+        let minDist = Infinity;
+        let minIdx = -1;
+        dots.forEach(d => {
+            const dx = d.x - p.x;
+            const dy = d.y - p.y;
+            const dist = dx*dx + dy*dy;
+            if (dist < minDist) {
+                minDist = dist;
+                minIdx = d.index;
+            }
+        });
+        return minIdx;
+    });
+}
+
+function isSameSet(setA, setB) {
+    if (setA.size !== setB.size) return false;
+    for (let a of setA) if (!setB.has(a)) return false;
+    return true;
+}
+
+// --- メイン処理 ---
+const canvas = document.getElementById('gameCanvas');
+const ctx = canvas.getContext('2d');
+let animationFrameId;
+
+// イベントリスナー
+canvas.addEventListener('mousedown', (e) => {
+    if (!isGameReady) return;
+    if (audioCtx.state === 'suspended') audioCtx.resume();
+    const rect = canvas.getBoundingClientRect();
+    const mx = e.clientX - rect.left;
+    const my = e.clientY - rect.top;
+    
+    // UI Click
+    if (hitTest(mx, my, buttonRect)) {
+        checkMatch();
+        return;
+    }
+    if (hitTest(mx, my, playRect)) {
+        playAllRandomPatterns();
+        return;
+    }
+
+    // Dot Click
+    dots.forEach(d => {
+        const dist = Math.hypot(mx - d.x, my - d.y);
+        if (dist <= RADIUS) {
+            startDrawing(d.index, mx, my);
+        }
+    });
+});
+
+canvas.addEventListener('mousemove', (e) => {
+    if (!dragging) return;
+    const rect = canvas.getBoundingClientRect();
+    const mx = e.clientX - rect.left;
+    const my = e.clientY - rect.top;
+    currentMousePos = {x: mx, y: my};
+
+    dots.forEach(d => {
+        const dist = Math.hypot(mx - d.x, my - d.y);
+        if (dist <= RADIUS) {
+            handleDotEnter(d.index);
+        }
+    });
+});
+
+canvas.addEventListener('mouseup', () => {
+    if (dragging) {
+        endDrawing();
+    }
+});
+
+function startDrawing(dotIndex, mx, my) {
+    selected = [dotIndex];
+    pathPoints = [{x: mx, y: my}];
+    dragging = true;
+    lastDotIndex = dotIndex;
+    specialReentryUsed = false;
+    currentMousePos = {x: mx, y: my};
+}
+
+function handleDotEnter(idx) {
+    const last = selected[selected.length - 1];
+    
+    if (idx === 0 && last === 0 && selected.length > 1 && !specialReentryUsed) {
+       specialReentryUsed = true;
+       return; 
+    }
+
+    if (idx === last) return;
+
+    if ((last === 2 && idx === 4) || (last === 4 && idx === 2)) {
+         selected.push(3);
+         const d3 = dots.find(d => d.index === 3);
+         pathPoints.push({x: d3.x, y: d3.y});
+         lastDotIndex = 3;
+    }
+
+    selected.push(idx);
+    const d = dots.find(d => d.index === idx);
+    pathPoints.push({x: d.x, y: d.y});
+    lastDotIndex = idx;
+}
+
+function endDrawing() {
+    dragging = false;
+    if (pathPoints.length > 1 && userPatterns.length < 10) {
+        const usedLines = new Set();
+        const indices = patternToIndices(pathPoints);
+        for(let i=0; i<indices.length-1; i++) {
+            const u = indices[i];
+            const v = indices[i+1];
+            if (u === v && u === 0) { 
+                usedLines.add("0,0");
+            } else {
+                usedLines.add([Math.min(u, v), Math.max(u, v)].toString());
+            }
+        }
+        userPatterns.push({
+            path: [...pathPoints], 
+            used_lines: usedLines,
+            indices: indices
+        });
+    }
+    selected = [];
+    pathPoints = [];
+}
+
+function checkMatch() {
+    userPatterns.forEach((up, i) => {
+        setTimeout(() => {
+            playPatternSound(up.path);
+        }, i * 500);
+    });
+
+    userPatterns.forEach(up => {
+        randomPatterns.forEach((rp, idx) => {
+            if (isSameSet(up.used_lines, rp.used_lines)) {
+                if (!matchedWords.find(m => m.idx === idx)) {
+                    matchedWords.push({idx: idx, word: rp.word});
+                }
+            }
+        });
+    });
+
+    if (matchedWords.length === randomPatterns.length && randomPatterns.length > 0) {
+        setTimeout(() => {
+            alert("Stage Clear! Generating new words...");
+            userPatterns = [];
+            matchedWords = [];
+            randomPatterns = generateRandomPatterns(Math.floor(Math.random() * 4) + 3);
+            playAllRandomPatterns();
+        }, 1000);
+    }
+}
+
+function playAllRandomPatterns() {
+    if (!isGameReady) return;
+    randomPatterns.forEach((rp, i) => {
+        if (!matchedWords.find(m => m.idx === i)) {
+            setTimeout(() => {
+                playPatternSound(rp.path);
+            }, i * 800);
+        }
+    });
+}
+
+function hitTest(mx, my, rect) {
+    return mx >= rect.x && mx <= rect.x + rect.w && my >= rect.y && my <= rect.y + rect.h;
+}
+
+function drawSmoothPath(pts, ctx, color, scale=1.0, offsetX=0, offsetY=0) {
+    if (pts.length < 2) return;
+    
+    ctx.beginPath();
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 4;
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+
+    ctx.moveTo(offsetX + pts[0].x * scale, offsetY + pts[0].y * scale);
+    for (let i = 1; i < pts.length; i++) {
+        ctx.lineTo(offsetX + pts[i].x * scale, offsetY + pts[i].y * scale);
+    }
+    ctx.stroke();
+    
+    const last = pts[pts.length-1];
+    ctx.fillStyle = color;
+    ctx.beginPath();
+    ctx.arc(offsetX + last.x*scale, offsetY + last.y*scale, 4, 0, Math.PI*2);
+    ctx.fill();
+}
+
+
+// --- 描画ループ ---
+function draw() {
+    ctx.fillStyle = BG_COLOR;
+    ctx.fillRect(0, 0, WIDTH, HEIGHT);
+
+    if (!isGameReady) {
+        // ロード中は描画しない
+        requestAnimationFrame(draw);
+        return;
+    }
+    
+    // キャラクター (Placeholder)
+    ctx.fillStyle = "#333";
+    ctx.fillRect(WIDTH - 150, 10, 140, 200);
+    ctx.fillStyle = "#555";
+    ctx.font = "20px monospace";
+    ctx.fillText("CHARA_IMG", WIDTH - 135, 120);
+    
+    // PLAY Button (Near chara)
+    ctx.fillStyle = PLAY_BUTTON_BG;
+    ctx.fillRect(playRect.x, playRect.y, playRect.w, playRect.h);
+    ctx.fillStyle = BUTTON_TEXT_COLOR;
+    ctx.fillText("PLAY", playRect.x + 20, playRect.y + 27);
+
+
+    // 1. Random Patterns (Top)
+    let rx = 20;
+    const ry = HEIGHT - 250; 
+    const scale = 0.3;
+    
+    randomPatterns.forEach((rp, idx) => {
+        const isMatched = matchedWords.find(m => m.idx === idx);
+        
+        ctx.fillStyle = "#333";
+        ctx.fillRect(rx, ry - 20, 80, 80);
+        
+        if (isMatched) {
+            drawSmoothPath(rp.path, ctx, "#FFC864", scale, rx - dots[0].x*scale + 10, ry - dots[0].y*scale + 10);
+            ctx.fillStyle = "#FFFF00";
+            ctx.font = "16px monospace";
+            ctx.fillText(rp.word, rx + 10, ry + 75);
+        } else {
+            ctx.fillStyle = "#444";
+            ctx.fillRect(rx + 5, ry - 15, 70, 70);
+            ctx.fillStyle = "#666";
+            ctx.font = "30px monospace";
+            ctx.fillText("?", rx + 30, ry + 30);
+        }
+        rx += 90;
+    });
+
+    // 2. User Patterns (Bottom)
+    let ux = 20;
+    const uy = HEIGHT - 150;
+    userPatterns.forEach(up => {
+        drawSmoothPath(up.path, ctx, LINE_COLOR, scale, ux - dots[0].x*scale + 10, uy - dots[0].y*scale + 10);
+        ux += 90;
+    });
+
+    // 3. Main Interface
+    if (selected.length > 0) {
+        ctx.beginPath();
+        ctx.strokeStyle = LINE_COLOR;
+        ctx.lineWidth = 6;
+        ctx.lineCap = 'round';
+        for (let i = 0; i < selected.length - 1; i++) {
+            const d1 = dots.find(d => d.index === selected[i]);
+            const d2 = dots.find(d => d.index === selected[i+1]);
+            ctx.moveTo(d1.x, d1.y);
+            ctx.lineTo(d2.x, d2.y);
+        }
+        if (dragging && currentMousePos) {
+            const last = dots.find(d => d.index === selected[selected.length-1]);
+            ctx.moveTo(last.x, last.y);
+            ctx.lineTo(currentMousePos.x, currentMousePos.y);
+        }
+        ctx.stroke();
+    }
+
+    // Draw Dots
+    dots.forEach(d => {
+        const isActive = selected.includes(d.index);
+        ctx.fillStyle = isActive ? DOT_ACTIVE_COLOR : DOT_COLOR;
+        ctx.beginPath();
+        ctx.arc(d.x, d.y, RADIUS, 0, Math.PI * 2);
+        ctx.fill();
+    });
+
+    // SAY Button
+    ctx.fillStyle = BUTTON_BG;
+    ctx.fillRect(buttonRect.x, buttonRect.y, buttonRect.w, buttonRect.h);
+    ctx.fillStyle = BUTTON_TEXT_COLOR;
+    ctx.font = "20px Arial";
+    ctx.fillText("SAY", buttonRect.x + 20, buttonRect.y + 27);
+
+    animationFrameId = requestAnimationFrame(draw);
+}
+
+// Start dictionary loading and animation loop
+loadDictionary();
+draw();
+
+</script>
 </body>
 </html>
