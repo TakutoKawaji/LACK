@@ -89,7 +89,8 @@ const playRect = {x: WIDTH - 120, y: 220, w: 80, h: 40};
 async function loadDictionary() {
     const overlay = document.getElementById('overlay');
     try {
-        const response = await fetch('mydic.json');
+        const jsonPath = '/LACK/mydic.json';
+        const response = await fetch(jsonPath);
         if (!response.ok) {
             throw new Error(`HTTP error! status: ${response.status}`);
         }
