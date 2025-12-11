@@ -29,7 +29,7 @@
     </style>
 </head>
 <body>
-    <div id="overlay">Loading Dictionary...</div>
+    <div id="overlay">Click anywhere to start Audio Context</div>
     <canvas id="gameCanvas" width="800" height="600"></canvas>
 
 <script>
@@ -64,9 +64,6 @@ let dragging = false;
 let currentMousePos = {x: 0, y: 0};
 let lastDotIndex = null;
 let specialReentryUsed = false;
-// JSONデータとロード状態を格納する変数を定義
-let dictionaryData = null; 
-let isGameReady = false; 
 
 // パターン管理
 let userPatterns = []; // {path: [], used_lines: Set, indices: []}
@@ -85,6 +82,21 @@ const CODE_TO_LINE = {
     "b": [[0, 0]],
 };
 
+// 仮の辞書データ (Pickleがないため代用)
+// キー: 単語, 値: {code: 文字列列}
+const MOCK_DICTIONARY = {
+    "moon": {code: "mno"}, // m(2-3,3-4), n(0-1), o(1-4)
+    "rain": {code: "ran"}, // r(0-4), a(0-2), n(0-1)
+    "sky":  {code: "kya"}, // k(0-3), y(1-2), a(0-2)
+    "bar":  {code: "bra"}, // b(0-0), r(0-4), a(0-2)
+    "nyan": {code: "nya"}, // n(0-1), y(1-2), a(0-2)
+    "rom":  {code: "rm"},  // r(0-4), m(2-3,3-4) -> つながらないかも？グラフ理論でチェック
+    "may":  {code: "may"}, 
+    "key":  {code: "ky"},
+    "no":   {code: "no"},
+    "on":   {code: "on"}
+};
+
 // --- Web Audio API (サウンドエンジン) ---
 const AudioContext = window.AudioContext || window.webkitAudioContext;
 let audioCtx = new AudioContext();
@@ -94,7 +106,6 @@ masterGain.gain.value = 0.3;
 
 // 音声生成関数 (Pythonのscipyロジックを近似)
 function playSoundForLine(u, v, startTime, duration) {
-    if (!isGameReady) return;
     const pair = [Math.min(u, v), Math.max(u, v)].toString();
     const osc = audioCtx.createOscillator();
     const gain = audioCtx.createGain();
@@ -184,8 +195,7 @@ function playSoundForLine(u, v, startTime, duration) {
     }
 }
 
-function playPatternSound(patternPath) {
-    if (!isGameReady) return;
+function playPatternSound(patternPath, usedLinesSet) {
     if (audioCtx.state === 'suspended') audioCtx.resume();
     
     // パスに含まれる点をインデックスに変換
@@ -202,46 +212,14 @@ function playPatternSound(patternPath) {
     }
 }
 
-
-// --- JSON辞書のロード ---
-async function loadDictionary() {
-    const overlay = document.getElementById('overlay');
-    try {
-        // GitHub Pagesまたはローカルサーバーで動作させるため、相対パス './mydic.json' を使用
-        const response = await fetch('./mydic.json');
-        
-        if (!response.ok) {
-            throw new Error(`HTTP error! status: ${response.status} (Check file path and existence)`);
-        }
-        dictionaryData = await response.json();
-        
-        // 辞書ロード後、ゲーム初期化を実行 (initDots()はここで一度だけ呼ばれる)
-        initDots();
-        randomPatterns = generateRandomPatterns(5);
-        playAllRandomPatterns(); // 初回再生
-        
-        overlay.textContent = "Click anywhere to start Audio Context";
-        isGameReady = true;
-        
-    } catch (e) {
-        console.error("Failed to load dictionary:", e);
-        // エラーメッセージをオーバーレイに表示
-        overlay.style.color = "#FF6666";
-        overlay.textContent = `Error loading mydic.json: ${e.message}. Check browser console for details.`;
-    }
-}
-
 // --- ロジック関数 ---
 
 function initDots() {
-    // 既にdotsが空でない場合は再初期化をスキップ（通常、一度だけ呼ばれる）
-    if (dots.length > 0) return;
-    
     let index = 0;
     for (let row = 0; row < 3; row++) {
         for (let col = 0; col < 3; col++) {
             if (row === 0 && col === 1) continue;
-            if (row === 1) continue; // 中央行は全スキップ
+            if (row === 1) continue; // 中央行は全スキップ？コード通りならこうなる
             
             const x = grid_x + col * SPACING_X;
             const y = grid_y + row * SPACING_Y;
@@ -253,7 +231,9 @@ function initDots() {
             });
         }
     }
-    // dotのインデックス: (0,0)->0, (0,2)->1, (2,0)->2, (2,1)->3, (2,2)->4 (計5個)
+    // dotのインデックスは append 順になる
+    // (0,0)->0, (0,2)->1, (2,0)->2, (2,1)->3, (2,2)->4 
+    // 計5個のドット
 }
 
 function randomPointInDot(dotIdx) {
@@ -268,9 +248,11 @@ function randomPointInDot(dotIdx) {
 
 // オイラー路探索 (Python logic port)
 function findEulerianPath(edges) {
+    // Adjacency list
     const graph = {};
     const degrees = {};
     
+    // Init graph
     for (let i=0; i<5; i++) { graph[i] = []; degrees[i] = 0; }
 
     edges.forEach(e => {
@@ -281,7 +263,8 @@ function findEulerianPath(edges) {
         degrees[v]++;
     });
 
-    let startNode = edges.length > 0 ? edges[0][0] : 0;
+    // Find start node (odd degree or first node)
+    let startNode = edges[0][0];
     for (let k in degrees) {
         if (degrees[k] % 2 === 1) {
             startNode = parseInt(k);
@@ -289,8 +272,19 @@ function findEulerianPath(edges) {
         }
     }
 
-    let stack = [startNode];
     let route = [];
+    let stack = [startNode];
+    
+    // Hierholzer's algorithm or DFS approach for path
+    // Python code implements a DFS based approach removing edges
+    // create a copy of edges to consume
+    let availableEdges = [...edges];
+    
+    // JS implementation of the specific logic in Python code is tricky 
+    // because python list 'graph' removes items.
+    // Let's reimplement a simpler version suitable for this small graph
+    
+    // Re-build mutable graph
     const adj = {};
     for(let i=0; i<5; i++) adj[i] = [];
     edges.forEach(e => {
@@ -298,10 +292,14 @@ function findEulerianPath(edges) {
         adj[e[1]].push(e[0]);
     });
 
+    stack = [startNode];
+    route = [];
+
     while (stack.length > 0) {
         let v = stack[stack.length - 1];
         if (adj[v] && adj[v].length > 0) {
             let u = adj[v].pop();
+            // remove v from u's list
             const idx = adj[u].indexOf(v);
             if (idx > -1) adj[u].splice(idx, 1);
             stack.push(u);
@@ -313,14 +311,12 @@ function findEulerianPath(edges) {
 }
 
 function generateRandomPatterns(count=5) {
-    if (!dictionaryData) return []; // 辞書がない場合はスキップ
-    
     const results = [];
-    const keys = Object.keys(dictionaryData);
+    const keys = Object.keys(MOCK_DICTIONARY);
     
     for (let i=0; i<count; i++) {
         const word = keys[Math.floor(Math.random() * keys.length)];
-        const entry = dictionaryData[word];
+        const entry = MOCK_DICTIONARY[word];
         if (!entry) continue;
 
         const codeStr = entry.code;
@@ -335,7 +331,7 @@ function generateRandomPatterns(count=5) {
 
         try {
             const pathIndices = findEulerianPath(edges);
-            if (pathIndices.length < 2) continue;
+            if (pathIndices.length < 2) continue; // 失敗
 
             const path = pathIndices.map(idx => randomPointInDot(idx));
             
@@ -391,10 +387,12 @@ const ctx = canvas.getContext('2d');
 const buttonRect = {x: WIDTH - 100, y: HEIGHT - 60, w: 80, h: 40};
 const playRect = {x: 600, y: 50, w: 80, h: 40}; // 仮位置
 
+// 初期化
+initDots();
+randomPatterns = generateRandomPatterns(5);
+
 // イベントリスナー
 canvas.addEventListener('mousedown', (e) => {
-    if (!isGameReady) return; // 準備未完了なら操作を無視
-    
     if (audioCtx.state === 'suspended') audioCtx.resume();
     const rect = canvas.getBoundingClientRect();
     const mx = e.clientX - rect.left;
@@ -459,21 +457,32 @@ function handleDotEnter(idx) {
     
     // Special reentry (idx 0 to 0)
     if (idx === 0 && last === 0 && selected.length > 1 && !specialReentryUsed) {
+       // 簡易実装: ループしたことにする
        specialReentryUsed = true;
+       // 本家のような複雑なパス変形は省略し、再選択のみ行う
        return; 
     }
 
     if (idx === last) return;
 
+    // Line definition
+    const lineKey = [Math.min(last, idx), Math.max(last, idx)].toString();
+    
+    // Check if line already used (prevent backtracking on same line segment immediately?)
+    // Python logic: if line not in used_lines ...
+    
     // 2-3-4 skip logic (Python: if 2->4 or 4->2, insert 3)
     if ((last === 2 && idx === 4) || (last === 4 && idx === 2)) {
-          selected.push(3);
-          const d3 = dots.find(d => d.index === 3);
-          pathPoints.push({x: d3.x, y: d3.y});
-          lastDotIndex = 3;
+         selected.push(3);
+         const d3 = dots.find(d => d.index === 3);
+         pathPoints.push({x: d3.x, y: d3.y});
+         // Update last to 3, then proceed to add 4 next call or manually?
+         // Let's just push 3 then allow normal flow to push 4
+         lastDotIndex = 3;
     }
 
     // Normal connect
+    // 厳密な重複チェックは省略（楽しむため）
     selected.push(idx);
     const d = dots.find(d => d.index === idx);
     pathPoints.push({x: d.x, y: d.y});
@@ -506,8 +515,6 @@ function endDrawing() {
 }
 
 function checkMatch() {
-    if (!isGameReady) return;
-
     // Play user patterns first
     userPatterns.forEach((up, i) => {
         setTimeout(() => {
@@ -522,6 +529,8 @@ function checkMatch() {
                 // Check if already matched
                 if (!matchedWords.find(m => m.idx === idx)) {
                     matchedWords.push({idx: idx, word: rp.word});
+                    // Replace random pattern visual with user input style (or just reveal)
+                    // rp.path = up.path; // update path to match user's drawing style?
                 }
             }
         });
@@ -533,15 +542,19 @@ function checkMatch() {
             alert("Stage Clear! Generating new words...");
             userPatterns = [];
             matchedWords = [];
-            // ステージクリア後に新しいパターンを生成
             randomPatterns = generateRandomPatterns(Math.floor(Math.random() * 4) + 3);
             playAllRandomPatterns();
         }, 1000);
+    } else {
+         // Reset user input after check? or keep? Python code clears everything on full match.
+         // Here we clear user input to let them try again? 
+         // Original code: loops over patterns, if full match, clears.
+         // Let's keep user patterns visible until they clear or manually delete (Right click logic in python)
+         // Python: Right click pops pattern.
     }
 }
 
 function playAllRandomPatterns() {
-    if (!isGameReady) return;
     randomPatterns.forEach((rp, i) => {
         if (!matchedWords.find(m => m.idx === i)) {
             setTimeout(() => {
@@ -555,6 +568,7 @@ function hitTest(mx, my, rect) {
     return mx >= rect.x && mx <= rect.x + rect.w && my >= rect.y && my <= rect.y + rect.h;
 }
 
+// Catmull-Rom Spline for smoothing (Python logic port)
 function drawSmoothPath(pts, ctx, color, scale=1.0, offsetX=0, offsetY=0) {
     if (pts.length < 2) return;
     
@@ -564,6 +578,9 @@ function drawSmoothPath(pts, ctx, color, scale=1.0, offsetX=0, offsetY=0) {
     ctx.lineCap = 'round';
     ctx.lineJoin = 'round';
 
+    // Simple Line for now to save performance, or Quadratic curves
+    // The python code implements manual Catmull-Rom. Let's use standard lineTo for JS speed
+    // If you want smooth:
     ctx.moveTo(offsetX + pts[0].x * scale, offsetY + pts[0].y * scale);
     for (let i = 1; i < pts.length; i++) {
         ctx.lineTo(offsetX + pts[i].x * scale, offsetY + pts[i].y * scale);
@@ -583,21 +600,7 @@ function drawSmoothPath(pts, ctx, color, scale=1.0, offsetX=0, offsetY=0) {
 function draw() {
     ctx.fillStyle = BG_COLOR;
     ctx.fillRect(0, 0, WIDTH, HEIGHT);
-    
-    const overlay = document.getElementById('overlay');
 
-    // **!!! 重要なガード !!!** 辞書ロードが完了するまでメイン描画をスキップ
-    if (!isGameReady) {
-        ctx.fillStyle = "#888";
-        ctx.font = "24px monospace";
-        // overlay が表示されているため、ここでは特別なメッセージは不要
-        requestAnimationFrame(draw);
-        return;
-    }
-    
-    // ロードが完了したらオーバーレイを非表示/透明化
-    overlay.style.opacity = '0';
-    
     // キャラクター (Placeholder)
     ctx.fillStyle = "#333";
     ctx.fillRect(WIDTH - 150, 10, 140, 200);
@@ -611,10 +614,15 @@ function draw() {
     ctx.fillStyle = PLAY_BUTTON_BG;
     ctx.fillRect(playRect.x, playRect.y, playRect.w, playRect.h);
     ctx.fillStyle = BUTTON_TEXT_COLOR;
-    ctx.fillText("PLAY", playRect.x + 20, playRect.y + 27);
+    ctx.fillText("PLAY", playRect.x + 20, playRect.y + 25);
 
 
     // Dots & Lines (Main Area)
+    // Draw finished user patterns (history) at bottom?
+    // Python code draws: 
+    // 1. Random patterns (hidden/revealed) at top
+    // 2. User patterns at bottom
+    // 3. Current interaction on dots
     
     // 1. Random Patterns (Top)
     let rx = 20;
@@ -630,7 +638,6 @@ function draw() {
         
         if (isMatched) {
             // Draw Pattern
-            // パターン描画のオフセット計算を修正 (ドット座標の原点からのオフセットを適用)
             drawSmoothPath(rp.path, ctx, "#FFC864", scale, rx - dots[0].x*scale + 10, ry - dots[0].y*scale + 10);
             // Draw Word
             ctx.fillStyle = "#FFFF00";
@@ -651,12 +658,12 @@ function draw() {
     let ux = 20;
     const uy = HEIGHT - 150;
     userPatterns.forEach(up => {
-        // パターン描画のオフセット計算を修正
         drawSmoothPath(up.path, ctx, LINE_COLOR, scale, ux - dots[0].x*scale + 10, uy - dots[0].y*scale + 10);
         ux += 90;
     });
 
-    // 3. Main Interface - Draw connecting lines
+    // 3. Main Interface
+    // Draw connecting lines
     if (selected.length > 0) {
         ctx.beginPath();
         ctx.strokeStyle = LINE_COLOR;
@@ -698,8 +705,7 @@ function draw() {
 }
 
 // Start Loop
-loadDictionary(); // 辞書ロード開始 (非同期)
-draw();           // 描画ループ開始 (isGameReady が true になるまで待機)
+draw();
 
 </script>
 </body>
