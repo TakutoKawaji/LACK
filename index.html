@@ -82,20 +82,28 @@ const CODE_TO_LINE = {
     "b": [[0, 0]],
 };
 
-// 仮の辞書データ (Pickleがないため代用)
-// キー: 単語, 値: {code: 文字列列}
-const MOCK_DICTIONARY = {
-    "moon": {code: "mno"}, // m(2-3,3-4), n(0-1), o(1-4)
-    "rain": {code: "ran"}, // r(0-4), a(0-2), n(0-1)
-    "sky":  {code: "kya"}, // k(0-3), y(1-2), a(0-2)
-    "bar":  {code: "bra"}, // b(0-0), r(0-4), a(0-2)
-    "nyan": {code: "nya"}, // n(0-1), y(1-2), a(0-2)
-    "rom":  {code: "rm"},  // r(0-4), m(2-3,3-4) -> つながらないかも？グラフ理論でチェック
-    "may":  {code: "may"}, 
-    "key":  {code: "ky"},
-    "no":   {code: "no"},
-    "on":   {code: "on"}
-};
+// --- JSON辞書のロード ---
+async function loadDictionary() {
+    const overlay = document.getElementById('overlay');
+    try {
+        const response = await fetch('mydic.json');
+        if (!response.ok) {
+            throw new Error(`HTTP error! status: ${response.status}`);
+        }
+        dictionaryData = await response.json();
+        overlay.textContent = "Click anywhere to start Audio Context";
+        isGameReady = true;
+        
+        // 辞書ロード後、ゲーム初期化を実行
+        initDots();
+        randomPatterns = generateRandomPatterns(5);
+        playAllRandomPatterns(); // 初回再生
+        
+    } catch (e) {
+        console.error("Failed to load dictionary:", e);
+        overlay.textContent = `Error loading mydic.json: ${e.message}`;
+    }
+}
 
 // --- Web Audio API (サウンドエンジン) ---
 const AudioContext = window.AudioContext || window.webkitAudioContext;
@@ -705,6 +713,7 @@ function draw() {
 }
 
 // Start Loop
+loadDictionary();
 draw();
 
 </script>
